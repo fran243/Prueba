@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pccomponentes-app
+  namespace: desarrollo
+spec:
+  replicas: 6
+  selector:
+    matchLabels:
+      app: pccomponentes-app
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: pccomponentes-app     
+    spec:
+      containers:
+        - name: pccomponentes-fpm
+          image: eu.gcr.iopccomponentes-fpm:latest
+          resources:
+            requests:
+              memory: "200Mi"
+              cpu: "300m"
+            limits:
+              memory: "400Mi"
+              cpu: "500m"            
+          ports:
+            - containerPort: 9000
+          readinessProbe:
+            tcpSocket:
+              port: 9000
+            initialDelaySeconds: 5
+            periodSeconds: 3            
+          volumeMounts:
+            - name: files
+              mountPath: /var/logs/app/wms.log                                                     
+        - name: pccomponentes-nginx 
+          image: eu.gcr.io/pccomponentes-nginx:latest
+          resources:
+            requests:
+              memory: "200Mi"
+              cpu: "100m"
+            limits:
+              memory: "200Mi"
+              cpu: "100m"             
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 3                                                              
+      volumes:
+        - name: files

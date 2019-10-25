@@ -1,0 +1,6 @@
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: pre-produccion
+  labels:
+    name: pre-produccion

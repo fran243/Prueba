@@ -1,0 +1,198 @@
+def defineEnv() {
+    branchName="${env.BRANCH_NAME}"
+    if ( branchName == "master" ) {
+        return "production"
+    }
+    else if ( branchName == "integration" ) {
+        return "integration"
+    }
+    else {
+        return "staging"
+    }
+}
+pipeline {
+    agent {
+        label 'jenkins-agent'
+    }
+
+    environment {
+        CREDENTIAL_JSON         = credentials('pccomponentes-ci')
+        REPO_NAME               = "pccomponentes"
+        PROJECT                 = "pccomponentes"
+        PROJECT_ID              = "pccomponentes-tck-reserva"
+        COMPOSE_PROJECT_NAME    = "${env.JOB_NAME}-${env.BUILD_ID}"
+        REPO_URI                = "gcr.io"
+        CLUSTER_NAME            = "pccomponentes"
+        CLUSTER_ZONE            = "europe-west1-b"
+        GCP_ACCOUNT             = "ci-jenkins"
+        K8S_RESOURCE_TYPE       = "deployment"
+
+        SLACK_COLOR_DANGER  = '#E01563'
+        SLACK_COLOR_INFO    = '#6ECADC'
+        SLACK_COLOR_WARNING = '#FFC300'
+        SLACK_COLOR_GOOD    = '#3EB991'
+        SLACK_CHANNEL       = '#pccomponentes'
+
+        AUTHOR = sh (
+            script: 'git --no-pager show -s --format="%an" ${commit}',
+            returnStdout: true
+        ).trim()
+
+        SHORT_COMMIT = sh (
+            script: 'git rev-parse --short=7 HEAD',
+            returnStdout: true
+        ).trim()
+
+        STAGE=defineEnv()
+    }
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '5')) 
+    }
+    
+    stages {
+        stage('Preparation') {
+            steps {
+                echo 'Preparation...'
+
+                slackSend (color: "${env.SLACK_COLOR_INFO}",
+                            channel: "${env.SLACK_CHANNEL}",
+                            message: "*STARTED:* Job <${env.BUILD_URL}|${env.JOB_NAME}>. Build ${env.BUILD_NUMBER} by ${env.AUTHOR}")
+            }
+        }
+        stage('Build') {
+            steps {
+                sh """
+                    docker build \
+                        --build-arg STAGE=${env.STAGE} \
+                        --file docker/Dockerfile \
+                        --tag ${env.REPO_NAME}:latest \
+                        --target dependencies \
+                        .
+                """
+            }
+        }
+        stage('Final Build') {
+            when {
+                anyOf {
+                    branch "staging" // for staging environment
+                    branch "integration" // for integration environment
+                    branch "master"
+                }
+            }
+            steps {
+                sh """
+                    cat ${env.CREDENTIAL_JSON} | docker login -u _json_key --password-stdin https://${env.REPO_URI}
+                    docker build \
+                        --build-arg STAGE=${env.STAGE} \
+                        --file docker/Dockerfile \
+                        --tag ${env.REPO_NAME}:latest \
+                        .
+                """
+            }
+        }
+        stage('Docker Push') {
+            when {
+                anyOf {
+                    branch "staging" // for staging environment
+                    branch "integration" // for integration environment
+                    branch "master"
+                }
+            }
+            parallel {
+                stage('Push latest') {
+                    steps {
+                        sh """
+                            docker tag \
+                                ${env.REPO_NAME}:latest \
+                                ${env.REPO_URI}/${env.PROJECT_ID}/${env.REPO_NAME}:${env.BRANCH_NAME}-latest
+                            docker push ${env.REPO_URI}/${env.PROJECT_ID}/${env.REPO_NAME}:${env.BRANCH_NAME}-latest
+                       """
+                    }
+                }
+                stage('Push short-commit') {
+                    steps {
+                        sh """
+                            docker tag \
+                                ${env.REPO_NAME}:latest \
+                                ${env.REPO_URI}/${env.PROJECT_ID}/${env.REPO_NAME}:${env.BRANCH_NAME}-${env.SHORT_COMMIT}
+                            docker push ${env.REPO_URI}/${env.PROJECT_ID}/${env.REPO_NAME}:${env.BRANCH_NAME}-${env.SHORT_COMMIT}
+                        """
+                    }
+                }
+            }
+        }
+        stage('Deploy') {
+            when {
+                anyOf {
+                    branch "staging" // for staging environment
+                    branch "integration" // for Integration environment
+                }
+            }
+            steps {
+                    sh """
+                        gcloud auth activate-service-account "${env.GCP_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" --key-file="${env.CREDENTIAL_JSON}" --project="${PROJECT_ID}"
+                        gcloud container clusters get-credentials "${env.CLUSTER_NAME}" --zone "${env.CLUSTER_ZONE}" --project "${PROJECT_ID}"
+                        kubectl --namespace "${env.STAGE}" set image "${env.K8S_RESOURCE_TYPE}/${env.REPO_NAME}" "${env.REPO_NAME}"="${env.REPO_URI}/${env.PROJECT_ID}/${env.REPO_NAME}:${env.BRANCH_NAME}-${env.SHORT_COMMIT}"
+                    """
+            }
+        }
+        stage('Deploy Master') {
+            when {
+                anyOf {
+                    branch "master" 
+                }
+            }
+            steps {
+                slackSend (color: "${env.SLACK_COLOR_WARNING}",
+                    channel: "${env.SLACK_CHANNEL}",
+                    message: "*DEPLOY*: To accept deploy to production, click here <${env.JOB_URL}|${env.JOB_NAME}>")
+                script {
+                    def userInput = false
+                    try {
+                        timeout(time: 10, unit: 'MINUTES') {
+                            userInput = input(id: 'Proceed1', message: 'Do you want to proceed?', parameters: [
+                            [$class: 'BooleanParameterDefinition', defaultValue: true, description: 'Confirmation', name: 'Continue with the step']
+                            ])
+                        }
+                    } 
+                    catch(err) {
+                        userInput = false
+                    }
+
+                    if (userInput == true) {
+                        sh """
+                            gcloud auth activate-service-account "${env.GCP_ACCOUNT}@${PROJECT_ID}.iam.gserviceaccount.com" --key-file="${env.CREDENTIAL_JSON}" --project="${PROJECT_ID}"
+                            gcloud container clusters get-credentials "${env.CLUSTER_NAME}" --zone "${env.CLUSTER_ZONE}" --project "${PROJECT_ID}"
+                            kubectl --namespace ${env.STAGE} set image "${env.K8S_RESOURCE_TYPE}/${env.REPO_NAME}" "${env.REPO_NAME}"="${env.REPO_URI}/${env.PROJECT_ID}/${env.REPO_NAME}:${env.BRANCH_NAME}-${env.SHORT_COMMIT}"
+                        """
+                    } else {
+                        echo 'Doing nothing...'
+                    }
+                }
+            }
+        }
+    }
+    post {
+        //always {
+	        // Clean up Jenkins
+        //}
+        aborted {
+            echo "Sending message to Slack"
+            slackSend (color: "${env.SLACK_COLOR_WARNING}",
+                        channel: "${env.SLACK_CHANNEL}",
+                        message: "*ABORTED:* Job <${env.BUILD_URL}|${env.JOB_NAME}>. Build ${env.BUILD_NUMBER} by ${env.AUTHOR}")
+        }
+        failure {
+            echo "Sending message to Slack"
+            slackSend (color: "${env.SLACK_COLOR_DANGER}",
+                        channel: "${env.SLACK_CHANNEL}",
+                        message: "*FAILED:* Job <${env.BUILD_URL}|${env.JOB_NAME}>. Build ${env.BUILD_NUMBER} by ${env.AUTHOR}")
+        }
+        success {
+            echo "Sending message to Slack"
+            slackSend (color: "${env.SLACK_COLOR_GOOD}",
+                        channel: "${env.SLACK_CHANNEL}",
+                        message: "*SUCCESS:* Job <${env.BUILD_URL}|${env.JOB_NAME}>. Build ${env.BUILD_NUMBER} by ${env.AUTHOR}")
+        }
+    }
+}

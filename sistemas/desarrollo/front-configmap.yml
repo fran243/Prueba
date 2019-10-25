@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pccomponentes-front
+  namespace: desarrollo
+  labels:
+    app: pccomponentes-front
+data:

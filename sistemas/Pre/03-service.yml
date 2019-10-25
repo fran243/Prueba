@@ -1,0 +1,14 @@
+ 
+apiVersion: v1
+kind: Service
+metadata:
+  name: pccomponentes-svc
+  namespace: pre
+spec:
+  ports:
+  - name: tcp
+    port: 9000
+    targetPort: 9000
+    protocol: TCP
+  selector:
+    app: pccomponentes-app
